@@ -8,15 +8,17 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 
+# -----------------------------------------------------
 # Load environment variables
+# -----------------------------------------------------
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# -----------------------------
+# -----------------------------------------------------
 # Configuration
-# -----------------------------
+# -----------------------------------------------------
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
@@ -30,9 +32,9 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-# -----------------------------
+# -----------------------------------------------------
 # REGISTER USER
-# -----------------------------
+# -----------------------------------------------------
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
@@ -58,9 +60,9 @@ def register():
     return jsonify({"success": True, "message": "Registration successful!"}), 201
 
 
-# -----------------------------
+# -----------------------------------------------------
 # LOGIN USER
-# -----------------------------
+# -----------------------------------------------------
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
@@ -86,70 +88,74 @@ def login():
     }), 200
 
 
-# -----------------------------
+# -----------------------------------------------------
 # GET PROFILE INFO
-# -----------------------------
+# -----------------------------------------------------
 @app.route("/profile/<user_id>", methods=["GET"])
 def get_profile(user_id):
     try:
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         if not user:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"success": False, "error": "User not found"}), 404
 
         return jsonify({
-            "id": str(user["_id"]),
-            "name": user["name"],
-            "email": user["email"],
-            "photo": user.get("photo")
+            "success": True,
+            "user": {
+                "id": str(user["_id"]),
+                "name": user["name"],
+                "email": user["email"],
+                "photo": user.get("photo")
+            }
         }), 200
     except Exception:
-        return jsonify({"error": "Invalid user ID"}), 400
+        return jsonify({"success": False, "error": "Invalid user ID"}), 400
 
 
-# -----------------------------
+# -----------------------------------------------------
 # UPLOAD PROFILE PHOTO
-# -----------------------------
+# -----------------------------------------------------
 @app.route("/upload-photo/<user_id>", methods=["POST"])
 def upload_photo(user_id):
     """Handles image upload for user profiles"""
     if "photo" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        return jsonify({"success": False, "error": "No file uploaded"}), 400
 
     file = request.files["photo"]
     if file.filename == "":
-        return jsonify({"error": "No file selected"}), 400
+        return jsonify({"success": False, "error": "No file selected"}), 400
 
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         file.save(filepath)
 
-        # Store relative path in MongoDB
+        # Update MongoDB record with new photo path
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
             {"$set": {"photo": f"/uploads/{filename}"}}
         )
 
         return jsonify({
+            "success": True,
             "message": "Photo uploaded successfully!",
             "photo": f"/uploads/{filename}"
         }), 200
 
-    return jsonify({"error": "Invalid file type"}), 400
+    return jsonify({"success": False, "error": "Invalid file type"}), 400
 
 
-# -----------------------------
+# -----------------------------------------------------
 # SERVE UPLOADED FILES
-# -----------------------------
+# -----------------------------------------------------
 @app.route("/uploads/<filename>")
 def serve_uploaded_file(filename):
     """Serves uploaded images"""
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
-# -----------------------------
+# -----------------------------------------------------
 # MAIN APP RUNNER
-# -----------------------------
+# -----------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
