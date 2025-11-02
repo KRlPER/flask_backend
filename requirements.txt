@@ -1,6 +1,7 @@
-Flask
-Flask-Cors
-pymongo
-dnspython
-werkzeug
-bson
+Flask==3.0.3
+Flask-Cors==4.0.0
+pymongo==4.7.1
+werkzeug==3.0.4
+dnspython==2.6.1
+gunicorn==21.2.0
+python-dotenv==1.0.1
