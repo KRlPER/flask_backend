@@ -5,11 +5,11 @@ from werkzeug.utils import secure_filename
 from bson.objectid import ObjectId
 from db import db
 from datetime import datetime
-
 from dotenv import load_dotenv
 import os
 
-load_dotenv() 
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -41,10 +41,10 @@ def register():
     password = data.get("password")
 
     if not all([name, email, password]):
-        return jsonify({"error": "All fields are required"}), 400
+        return jsonify({"success": False, "error": "All fields are required"}), 400
 
     if users_collection.find_one({"email": email}):
-        return jsonify({"error": "Email already registered"}), 400
+        return jsonify({"success": False, "error": "Email already registered"}), 400
 
     hashed_password = generate_password_hash(password)
     user = {
@@ -55,7 +55,7 @@ def register():
         "created_at": datetime.utcnow()
     }
     users_collection.insert_one(user)
-    return jsonify({"message": "Registration successful!"}), 201
+    return jsonify({"success": True, "message": "Registration successful!"}), 201
 
 
 # -----------------------------
@@ -68,13 +68,14 @@ def login():
     password = data.get("password")
 
     if not all([email, password]):
-        return jsonify({"error": "Email and password are required"}), 400
+        return jsonify({"success": False, "error": "Email and password are required"}), 400
 
     user = users_collection.find_one({"email": email})
     if not user or not check_password_hash(user["password"], password):
-        return jsonify({"error": "Invalid credentials"}), 401
+        return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
     return jsonify({
+        "success": True,
         "message": "Login successful!",
         "user": {
             "id": str(user["_id"]),
@@ -108,8 +109,9 @@ def get_profile(user_id):
 # -----------------------------
 # UPLOAD PROFILE PHOTO
 # -----------------------------
-@app.route("/upload/<user_id>", methods=["POST"])
+@app.route("/upload-photo/<user_id>", methods=["POST"])
 def upload_photo(user_id):
+    """Handles image upload for user profiles"""
     if "photo" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -122,7 +124,7 @@ def upload_photo(user_id):
         filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
         file.save(filepath)
 
-        # Update MongoDB
+        # Store relative path in MongoDB
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
             {"$set": {"photo": f"/uploads/{filename}"}}
@@ -141,6 +143,7 @@ def upload_photo(user_id):
 # -----------------------------
 @app.route("/uploads/<filename>")
 def serve_uploaded_file(filename):
+    """Serves uploaded images"""
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
