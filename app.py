@@ -12,29 +12,31 @@ from pymongo.errors import DuplicateKeyError
 from db import db, users_collection, locker_collection
 
 # -------------------------
-# Logging
+# LOGGING
 # -------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # -------------------------
-# Flask App Config
+# FLASK APP CONFIG
 # -------------------------
 app = Flask(__name__)
 
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25MB upload limit
 
+# Raise upload size to 25MB
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
+
+# Allowed file types
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif"}
 ALLOWED_FILE_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS.union(
     {"pdf", "txt", "doc", "docx", "xls", "xlsx", "ppt", "pptx"}
 )
 
 # -------------------------
-# CORS
+# CORS (Netlify + Local)
 # -------------------------
 CORS(app, origins=[
     "https://kriper1.netlify.app",
@@ -44,22 +46,22 @@ CORS(app, origins=[
 
 
 # -------------------------
-# Helpers
+# HELPERS
 # -------------------------
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_FILE_EXTENSIONS
 
 
 # -------------------------
-# Health
+# HEALTH CHECK
 # -------------------------
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({"ok": True}), 200
 
 
 # -------------------------
-# Register
+# REGISTER
 # -------------------------
 @app.route("/register", methods=["POST"])
 def register():
@@ -80,14 +82,14 @@ def register():
             "email": email,
             "password": hashed,
             "photo": None,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
         }
 
         res = users_collection.insert_one(user_doc)
 
         return jsonify({
             "success": True,
-            "message": "Registered",
+            "message": "Registration successful!",
             "user": {"id": str(res.inserted_id), "name": name, "email": email}
         }), 201
 
@@ -100,12 +102,13 @@ def register():
 
 
 # -------------------------
-# Login
+# LOGIN
 # -------------------------
 @app.route("/login", methods=["POST"])
 def login():
     try:
         data = request.get_json(force=True)
+
         email = (data.get("email") or "").strip().lower()
         password = data.get("password") or ""
 
@@ -133,20 +136,20 @@ def login():
 
 
 # -------------------------
-# Serve Uploaded Files
+# SERVE UPLOADED FILES
 # -------------------------
 @app.route("/uploads/<path:filename>")
-def serve_uploads(filename):
+def serve_uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
 # -------------------------
-# ADD LOCKER ITEM (fixed)
+# ADD LOCKER ITEM (FIXED)
 # -------------------------
 @app.route("/locker/<user_id>", methods=["POST"])
 def add_locker_item(user_id):
     try:
-        # FILE UPLOAD
+        # ======== FILE UPLOAD ========
         if request.content_type and "multipart/form-data" in request.content_type:
 
             file = request.files.get("file")
@@ -157,16 +160,17 @@ def add_locker_item(user_id):
                 return jsonify({"success": False, "error": "Invalid file type"}), 400
 
             filename = secure_filename(file.filename)
-            path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+            save_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
 
+            # avoid file conflicts
             base, ext = os.path.splitext(filename)
             counter = 1
-            while os.path.exists(path):
+            while os.path.exists(save_path):
                 filename = f"{base}_{counter}{ext}"
-                path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+                save_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
                 counter += 1
 
-            file.save(path)
+            file.save(save_path)
 
             item = {
                 "user_id": user_id,
@@ -179,11 +183,11 @@ def add_locker_item(user_id):
             }
 
             res = locker_collection.insert_one(item)
-            item["id"] = str(res.inserted_id)
+            item["id"] = str(res.inserted_id)  # FIXED: always convert
 
             return jsonify({"success": True, "item": item}), 201
 
-        # NOTE UPLOAD
+        # ======== NOTE ADD ========
         data = request.get_json(force=True)
         content = (data.get("content") or "").strip()
 
@@ -196,7 +200,7 @@ def add_locker_item(user_id):
             "title": data.get("title") or "",
             "content": content,
             "tags": [],
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
         }
 
         res = locker_collection.insert_one(item)
@@ -221,18 +225,20 @@ def get_locker_items(user_id):
         for r in rows:
             items.append({
                 "id": str(r["_id"]),
+                "user_id": r["user_id"],
                 "type": r["type"],
                 "title": r.get("title"),
                 "content": r.get("content"),
                 "file_path": r.get("file_path"),
                 "mime": r.get("mime"),
+                "tags": r.get("tags", []),
                 "created_at": r["created_at"].isoformat()
             })
 
         return jsonify({"success": True, "items": items}), 200
 
     except Exception as e:
-        logger.exception("List failed")
+        logger.exception("Get locker items failed")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -242,28 +248,29 @@ def get_locker_items(user_id):
 @app.route("/locker/item/<item_id>", methods=["DELETE"])
 def delete_locker_item(item_id):
     try:
-        item = locker_collection.find_one({"_id": ObjectId(item_id)})
-        if not item:
+        obj = locker_collection.find_one({"_id": ObjectId(item_id)})
+        if not obj:
             return jsonify({"success": False, "error": "Not found"}), 404
 
-        # delete file from disk
-        if item["type"] == "file" and item.get("file_path"):
-            fn = item["file_path"].replace("/uploads/", "")
-            full = os.path.join(app.config["UPLOAD_FOLDER"], fn)
-            if os.path.exists(full):
-                os.remove(full)
+        # delete file if applicable
+        if obj["type"] == "file" and obj.get("file_path"):
+            filename = obj["file_path"].replace("/uploads/", "")
+            full_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+            if os.path.exists(full_path):
+                os.remove(full_path)
 
         locker_collection.delete_one({"_id": ObjectId(item_id)})
         return jsonify({"success": True}), 200
 
     except Exception as e:
-        logger.exception("Delete failed")
+        logger.exception("Delete locker item failed")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 # -------------------------
-# Run
+# RUN SERVER
 # -------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
+    logger.info("Flask running on port %s", port)
     app.run(host="0.0.0.0", port=port)
