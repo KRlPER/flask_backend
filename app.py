@@ -220,24 +220,29 @@ def serve_uploaded_file(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
+
 # -------------------------
-# LOCKER: add item (file or note)
+# LOCKER: add item (file or note) — FIXED VERSION
 # -------------------------
 @app.route("/locker/<user_id>", methods=["POST"])
 def add_locker_item(user_id):
     try:
-        # multipart file upload
+        # --- FILE UPLOAD HANDLING ---
         if request.content_type and "multipart/form-data" in request.content_type:
+
+            # check file field
             if "file" not in request.files:
                 return jsonify({"success": False, "error": "No file uploaded"}), 400
+
             file = request.files["file"]
+
             if file.filename == "":
-                return jsonify({"success": False, "error": "No file selected"}), 400
-            if not allowed_file(file.filename):
-                return jsonify({"success": False, "error": "Invalid file type"}), 400
+                return jsonify({"success": False, "error": "Empty filename"}), 400
 
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+
+            # avoid filename conflicts
             base, ext = os.path.splitext(filename)
             counter = 1
             while os.path.exists(filepath):
@@ -245,49 +250,50 @@ def add_locker_item(user_id):
                 filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
                 counter += 1
 
+            # save file
             file.save(filepath)
-            mime = file.mimetype
-            title = request.form.get("title") or filename
-            tags_raw = request.form.get("tags") or ""
-            tags = [t.strip() for t in tags_raw.split(",")] if tags_raw else []
 
             item = {
                 "user_id": user_id,
                 "type": "file",
-                "title": title,
+                "title": request.form.get("title") or filename,
                 "file_path": f"/uploads/{filename}",
-                "mime": mime,
-                "tags": tags,
+                "mime": file.mimetype,
+                "tags": [],
                 "created_at": datetime.utcnow(),
             }
+
             res = locker_collection.insert_one(item)
+
+            # convert ObjectId to string BEFORE sending JSON
             item["id"] = str(res.inserted_id)
+
             return jsonify({"success": True, "item": item}), 201
 
-        # JSON note
-        data = request.get_json() or {}
+        # --- NOTE HANDLING ---
+        data = request.get_json(force=True)
         content = (data.get("content") or "").strip()
-        title = data.get("title") or ""
-        tags = data.get("tags") or []
+
         if not content:
-            return jsonify({"success": False, "error": "content required"}), 400
+            return jsonify({"success": False, "error": "Content required"}), 400
 
         item = {
             "user_id": user_id,
             "type": "note",
-            "title": title,
+            "title": data.get("title") or "",
             "content": content,
-            "tags": tags,
+            "tags": [],
             "created_at": datetime.utcnow(),
         }
+
         res = locker_collection.insert_one(item)
         item["id"] = str(res.inserted_id)
+
         return jsonify({"success": True, "item": item}), 201
 
     except Exception as e:
         logger.exception("Add locker item failed")
-        return jsonify({"success": False, "error": "internal error", "details": str(e)}), 500
-
+        return jsonify({"success": False, "error": "Internal error", "details": str(e)}), 500
 
 # -------------------------
 # LOCKER: list items
