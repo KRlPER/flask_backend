@@ -1,105 +1,158 @@
+# app.py
+import os
+import logging
+from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from bson.objectid import ObjectId
-from db import db
-from datetime import datetime
-from dotenv import load_dotenv
-import os
+from pymongo.errors import DuplicateKeyError
 
-# -----------------------------------------------------
-# Load environment variables
-# -----------------------------------------------------
-load_dotenv()
+# import db handles connection and exposes `db`, `users_collection`, `locker_collection`
+from db import db, users_collection, locker_collection
 
+# -------------------------
+# Logging
+# -------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# -------------------------
+# App init & config
+# -------------------------
 app = Flask(__name__)
-CORS(app)
 
-# -----------------------------------------------------
-# Configuration
-# -----------------------------------------------------
+# Upload folder config
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-# Allowed extensions for profile photos (images) and for locker files (images + docs)
+# Limit uploads to 8 MB (adjust if needed)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB
+
+# Allowed extensions
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif"}
-ALLOWED_FILE_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS.union({"pdf", "txt", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
+ALLOWED_FILE_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS.union(
+    {"pdf", "txt", "doc", "docx", "xls", "xlsx", "ppt", "pptx"}
+)
 
-users_collection = db.users
-locker_collection = db.locker_items  # will be created when first inserted
+# -------------------------
+# CORS: restrict to your frontend(s)
+# -------------------------
+# Provide FRONTEND_URLS as a comma-separated env var, e.g.
+# FRONTEND_URLS="https://your-frontend.onrender.com,http://localhost:5173"
+frontend_env = os.getenv("FRONTEND_URLS", "")
+if frontend_env:
+    origins = [u.strip() for u in frontend_env.split(",") if u.strip()]
+else:
+    # Fallback for dev convenience - tighten in production
+    origins = ["http://localhost:3000", "http://localhost:5173"]
 
+logger.info("CORS origins: %s", origins)
+CORS(app, origins=origins, supports_credentials=True)
 
+# -------------------------
+# Helpers
+# -------------------------
 def allowed_image(filename):
-    """Check if uploaded file has an allowed image extension"""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
 
 
 def allowed_file(filename):
-    """Check if uploaded file has an allowed general extension (locker)"""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_FILE_EXTENSIONS
 
 
-# -----------------------------------------------------
-# REGISTER USER
-# -----------------------------------------------------
+# -------------------------
+# Health check
+# -------------------------
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True}), 200
+
+
+# -------------------------
+# REGISTER
+# -------------------------
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.get_json()
-    name = data.get("name")
-    email = data.get("email")
-    password = data.get("password")
+    try:
+        data = request.get_json(force=True)
+        logger.info("Register payload: %s", {k: (v if k != "password" else "***") for k, v in (data or {}).items()})
 
-    if not all([name, email, password]):
-        return jsonify({"success": False, "error": "All fields are required"}), 400
+        name = (data.get("name") or "").strip()
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
 
-    if users_collection.find_one({"email": email}):
-        return jsonify({"success": False, "error": "Email already registered"}), 400
+        if not name or not email or not password:
+            return jsonify({"success": False, "error": "Missing name/email/password"}), 400
 
-    hashed_password = generate_password_hash(password)
-    user = {
-        "name": name,
-        "email": email,
-        "password": hashed_password,
-        "photo": None,
-        "created_at": datetime.utcnow()
-    }
-    users_collection.insert_one(user)
-    return jsonify({"success": True, "message": "Registration successful!"}), 201
+        if "@" not in email:
+            return jsonify({"success": False, "error": "Invalid email"}), 400
+
+        if len(password) < 6:
+            return jsonify({"success": False, "error": "Password must be at least 6 characters"}), 400
+
+        hashed_password = generate_password_hash(password)
+
+        user_doc = {
+            "name": name,
+            "email": email,
+            "password": hashed_password,
+            "photo": None,
+            "created_at": datetime.utcnow(),
+        }
+
+        try:
+            res = users_collection.insert_one(user_doc)
+        except DuplicateKeyError:
+            logger.warning("Duplicate registration attempt for email: %s", email)
+            return jsonify({"success": False, "error": "Email already registered"}), 409
+
+        inserted_id = str(res.inserted_id)
+        logger.info("User created: %s", inserted_id)
+
+        safe_user = {"id": inserted_id, "name": name, "email": email}
+        return jsonify({"success": True, "message": "Registration successful!", "user": safe_user}), 201
+
+    except Exception as e:
+        logger.exception("Register failed")
+        return jsonify({"success": False, "error": "Internal server error", "details": str(e)}), 500
 
 
-# -----------------------------------------------------
-# LOGIN USER
-# -----------------------------------------------------
+# -------------------------
+# LOGIN
+# -------------------------
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json()
-    email = data.get("email")
-    password = data.get("password")
+    try:
+        data = request.get_json(force=True)
+        logger.info("Login payload: %s", {k: (v if k != "password" else "***") for k, v in (data or {}).items()})
 
-    if not all([email, password]):
-        return jsonify({"success": False, "error": "Email and password are required"}), 400
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
 
-    user = users_collection.find_one({"email": email})
-    if not user or not check_password_hash(user["password"], password):
-        return jsonify({"success": False, "error": "Invalid credentials"}), 401
+        if not email or not password:
+            return jsonify({"success": False, "error": "Missing email/password"}), 400
 
-    return jsonify({
-        "success": True,
-        "message": "Login successful!",
-        "user": {
-            "id": str(user["_id"]),
-            "name": user["name"],
-            "email": user["email"],
-            "photo": user.get("photo")
-        }
-    }), 200
+        user = users_collection.find_one({"email": email})
+        if not user:
+            return jsonify({"success": False, "error": "Invalid credentials"}), 401
+
+        if not check_password_hash(user.get("password", ""), password):
+            return jsonify({"success": False, "error": "Invalid credentials"}), 401
+
+        safe_user = {"id": str(user["_id"]), "name": user.get("name"), "email": user.get("email"), "photo": user.get("photo")}
+        return jsonify({"success": True, "message": "Login successful", "user": safe_user}), 200
+
+    except Exception as e:
+        logger.exception("Login failed")
+        return jsonify({"success": False, "error": "Internal server error", "details": str(e)}), 500
 
 
-# -----------------------------------------------------
-# GET PROFILE INFO
-# -----------------------------------------------------
+# -------------------------
+# PROFILE
+# -------------------------
 @app.route("/profile/<user_id>", methods=["GET"])
 def get_profile(user_id):
     try:
@@ -107,78 +160,65 @@ def get_profile(user_id):
         if not user:
             return jsonify({"success": False, "error": "User not found"}), 404
 
-        return jsonify({
-            "success": True,
-            "user": {
-                "id": str(user["_id"]),
-                "name": user["name"],
-                "email": user["email"],
-                "photo": user.get("photo")
-            }
-        }), 200
-    except Exception:
-        return jsonify({"success": False, "error": "Invalid user ID"}), 400
+        safe_user = {"id": str(user["_id"]), "name": user.get("name"), "email": user.get("email"), "photo": user.get("photo")}
+        return jsonify({"success": True, "user": safe_user}), 200
+    except Exception as e:
+        logger.exception("Get profile failed")
+        return jsonify({"success": False, "error": "Invalid user ID", "details": str(e)}), 400
 
 
-# -----------------------------------------------------
+# -------------------------
 # UPLOAD PROFILE PHOTO
-# -----------------------------------------------------
+# -------------------------
 @app.route("/upload-photo/<user_id>", methods=["POST"])
 def upload_photo(user_id):
-    """Handles image upload for user profiles"""
-    if "photo" not in request.files:
-        return jsonify({"success": False, "error": "No file uploaded"}), 400
+    try:
+        if "photo" not in request.files:
+            return jsonify({"success": False, "error": "No file uploaded"}), 400
 
-    file = request.files["photo"]
-    if file.filename == "":
-        return jsonify({"success": False, "error": "No file selected"}), 400
+        file = request.files["photo"]
+        if file.filename == "":
+            return jsonify({"success": False, "error": "No file selected"}), 400
 
-    if file and allowed_image(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-
-        # avoid filename collisions
-        base, ext = os.path.splitext(filename)
-        counter = 1
-        while os.path.exists(filepath):
-            filename = f"{base}_{counter}{ext}"
+        if file and allowed_image(file.filename):
+            filename = secure_filename(file.filename)
             filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            counter += 1
 
-        file.save(filepath)
+            # avoid filename collisions
+            base, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(filepath):
+                filename = f"{base}_{counter}{ext}"
+                filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+                counter += 1
 
-        # Update MongoDB record with new photo path
-        users_collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$set": {"photo": f"/uploads/{filename}"}}
-        )
+            file.save(filepath)
 
-        return jsonify({
-            "success": True,
-            "message": "Photo uploaded successfully!",
-            "photo": f"/uploads/{filename}"
-        }), 200
+            users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": {"photo": f"/uploads/{filename}"}})
 
-    return jsonify({"success": False, "error": "Invalid file type"}), 400
+            return jsonify({"success": True, "message": "Photo uploaded successfully!", "photo": f"/uploads/{filename}"}), 200
+
+        return jsonify({"success": False, "error": "Invalid file type"}), 400
+    except Exception as e:
+        logger.exception("Upload photo failed")
+        return jsonify({"success": False, "error": "Internal server error", "details": str(e)}), 500
 
 
-# -----------------------------------------------------
+# -------------------------
 # SERVE UPLOADED FILES
-# -----------------------------------------------------
+# -------------------------
 @app.route("/uploads/<filename>")
 def serve_uploaded_file(filename):
-    """Serves uploaded images/files"""
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
-# -----------------------------------------------------
-# Digital Locker routes
-# -----------------------------------------------------
-# POST /locker/<user_id>  -> add note (JSON) or upload file (multipart)
+# -------------------------
+# LOCKER: add item (file or note)
+# -------------------------
 @app.route("/locker/<user_id>", methods=["POST"])
 def add_locker_item(user_id):
     try:
-        # File upload (multipart/form-data)
+        # multipart file upload
         if request.content_type and "multipart/form-data" in request.content_type:
             if "file" not in request.files:
                 return jsonify({"success": False, "error": "No file uploaded"}), 400
@@ -190,7 +230,6 @@ def add_locker_item(user_id):
 
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            # if file exists, rename to avoid collision
             base, ext = os.path.splitext(filename)
             counter = 1
             while os.path.exists(filepath):
@@ -211,17 +250,17 @@ def add_locker_item(user_id):
                 "file_path": f"/uploads/{filename}",
                 "mime": mime,
                 "tags": tags,
-                "created_at": datetime.utcnow()
+                "created_at": datetime.utcnow(),
             }
             res = locker_collection.insert_one(item)
             item["id"] = str(res.inserted_id)
             return jsonify({"success": True, "item": item}), 201
 
-        # JSON (note)
+        # JSON note
         data = request.get_json() or {}
         content = (data.get("content") or "").strip()
         title = data.get("title") or ""
-        tags = data.get("tags", []) or []
+        tags = data.get("tags") or []
         if not content:
             return jsonify({"success": False, "error": "content required"}), 400
 
@@ -231,18 +270,20 @@ def add_locker_item(user_id):
             "title": title,
             "content": content,
             "tags": tags,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
         }
         res = locker_collection.insert_one(item)
         item["id"] = str(res.inserted_id)
         return jsonify({"success": True, "item": item}), 201
 
     except Exception as e:
-        print("Error in add_locker_item:", e)
-        return jsonify({"success": False, "error": "internal error"}), 500
+        logger.exception("Add locker item failed")
+        return jsonify({"success": False, "error": "internal error", "details": str(e)}), 500
 
 
-# GET /locker/<user_id> -> list items for user
+# -------------------------
+# LOCKER: list items
+# -------------------------
 @app.route("/locker/<user_id>", methods=["GET"])
 def get_locker_items(user_id):
     try:
@@ -258,16 +299,18 @@ def get_locker_items(user_id):
                 "file_path": r.get("file_path"),
                 "mime": r.get("mime"),
                 "tags": r.get("tags", []),
-                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
             }
             items.append(item)
         return jsonify({"success": True, "items": items}), 200
     except Exception as e:
-        print("Error in get_locker_items:", e)
-        return jsonify({"success": False, "error": "internal error"}), 500
+        logger.exception("Get locker items failed")
+        return jsonify({"success": False, "error": "internal error", "details": str(e)}), 500
 
 
-# DELETE /locker/item/<item_id> -> delete item (and file if present)
+# -------------------------
+# LOCKER: delete item
+# -------------------------
 @app.route("/locker/item/<item_id>", methods=["DELETE"])
 def delete_locker_item(item_id):
     try:
@@ -275,7 +318,6 @@ def delete_locker_item(item_id):
         if not obj:
             return jsonify({"success": False, "error": "Not found"}), 404
 
-        # remove file from disk if record is a file
         if obj.get("type") == "file" and obj.get("file_path"):
             filename = os.path.basename(obj.get("file_path"))
             path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
@@ -283,18 +325,20 @@ def delete_locker_item(item_id):
                 if os.path.exists(path):
                     os.remove(path)
             except Exception as e:
-                print("Warning: could not remove file:", e)
+                logger.warning("Could not remove file: %s", e)
 
         locker_collection.delete_one({"_id": ObjectId(item_id)})
         return jsonify({"success": True}), 200
     except Exception as e:
-        print("Error in delete_locker_item:", e)
-        return jsonify({"success": False, "error": "invalid id"}), 400
+        logger.exception("Delete locker item failed")
+        return jsonify({"success": False, "error": "invalid id", "details": str(e)}), 400
 
 
-# -----------------------------------------------------
-# MAIN APP RUNNER
-# -----------------------------------------------------
+# -------------------------
+# Run
+# -------------------------
 if __name__ == "__main__":
+    # DO NOT set debug=True in production
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    logger.info("Starting Flask app on port %s", port)
+    app.run(host="0.0.0.0", port=port)
