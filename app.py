@@ -50,7 +50,14 @@ else:
     origins = ["http://localhost:3000", "http://localhost:5173"]
 
 logger.info("CORS origins: %s", origins)
-CORS(app, origins=origins, supports_credentials=True)
+# -------------------------
+# CORS — allow Netlify + Localhost
+# -------------------------
+CORS(app, origins=[
+    "https://kriper1.netlify.app",
+    "http://localhost:3000"
+], supports_credentials=True)
+
 
 # -------------------------
 # Helpers
