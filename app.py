@@ -100,7 +100,8 @@ def register():
         if len(password) < 6:
             return jsonify({"success": False, "error": "Password must be at least 6 characters"}), 400
 
-        hashed_password = generate_password_hash(password)
+        hashed_password = generate_password_hash(password, method="pbkdf2:sha256")
+
 
         user_doc = {
             "name": name,
