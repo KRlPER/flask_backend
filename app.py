@@ -21,6 +21,7 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 CORS(app, origins=[
+    "https://lockerbox.netlify.app",
     "https://kriper1.netlify.app",
     "http://localhost:3000"
 ], supports_credentials=True)
